@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hand Soccer AR - 2 Player Edition</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Arial', sans-serif; }
+        #ui { position: absolute; top: 20px; left: 50%; transform: translateX(-50%); color: white; font-size: 28px; z-index: 100; text-shadow: 2px 2px 4px #000; text-align: center; width: 100%; pointer-events: none; }
+        canvas { display: block; background: transparent; }
+        #input_video { display: none; }
+        #overlay {
+            position: absolute; width: 100%; height: 100%; background: rgba(0,0,0,0.8);
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            z-index: 200; color: white; text-align: center;
+        }
+        button {
+            padding: 20px 50px; font-size: 24px; cursor: pointer; border: none;
+            border-radius: 50px; background: #2ecc71; color: white; font-weight: bold;
+            box-shadow: 0px 9px 0px #27ae60; transition: 0.1s;
+        }
+        button:active { transform: translateY(4px); box-shadow: 0px 5px 0px #27ae60; }
+        .p1 { color: #00ecff; } .p2 { color: #ff0055; }
+    </style>
+</head>
+<body>
+
+    <div id="overlay">
+        <h1 style="font-size: 48px; margin-bottom: 10px;">HAND SOCCER AR</h1>
+        <p style="font-size: 18px;">Gunakan <span class="p1">Telunjuk</span> untuk menyundul bola ke gawang!<br>Jangan biarkan bola jatuh ke bawah!</p>
+        <button onclick="startGame()">MULAI PERTANDINGAN</button>
+    </div>
+
+    <div id="ui">
+        GOL: <span id="score">0</span> | NYAWA: <span id="lives">3</span>
+    </div>
+    
+    <video id="input_video"></video>
+    <canvas id="output_canvas"></canvas>
+
+    <script>
+        const videoElement = document.getElementById('input_video');
+        const canvasElement = document.getElementById('output_canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const scoreElement = document.getElementById('score');
+        const livesElement = document.getElementById('lives');
+
+        let audioCtx;
+        let score = 0, lives = 3, gameActive = false;
+        let balls = [];
+
+        canvasElement.width = window.innerWidth;
+        canvasElement.height = window.innerHeight;
+
+        // --- SOUND EFFECTS ---
+        function playKickSound() {
+            if (!audioCtx) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(150, audioCtx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(40, audioCtx.currentTime + 0.1);
+            gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+            gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.1);
+            osc.connect(gain); gain.connect(audioCtx.destination);
+            osc.start(); osc.stop(audioCtx.currentTime + 0.1);
+        }
+
+        function playGoalSound() {
+            if (!audioCtx) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'square';
+            osc.frequency.setValueAtTime(400, audioCtx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(800, audioCtx.currentTime + 0.2);
+            gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+            osc.connect(gain); gain.connect(audioCtx.destination);
+            osc.start(); osc.stop(audioCtx.currentTime + 0.2);
+        }
+
+        // --- BALL LOGIC ---
+        class Ball {
+            constructor() {
+                this.radius = 40;
+                this.reset();
+            }
+            reset() {
+                this.x = Math.random() * (canvasElement.width - 100) + 50;
+                this.y = canvasElement.height / 2;
+                this.vx = (Math.random() - 0.5) * 10;
+                this.vy = 2;
+                this.gravity = 0.25;
+            }
+            update() {
+                this.vy += this.gravity;
+                this.x += this.vx;
+                this.y += this.vy;
+
+                // Pantulan Dinding
+                if (this.x < this.radius || this.x > canvasElement.width - this.radius) this.vx *= -1;
+
+                // Cek Gawang (Bagian Atas)
+                if (this.y < 0) {
+                    score++;
+                    scoreElement.innerText = score;
+                    playGoalSound();
+                    this.reset();
+                }
+
+                // Jatuh (Out)
+                if (this.y > canvasElement.height) {
+                    lives--;
+                    livesElement.innerText = lives;
+                    if (lives <= 0) gameOver();
+                    else this.reset();
+                }
+            }
+            draw() {
+                // Gambar Bola Sepak Sederhana
+                canvasCtx.beginPath();
+                canvasCtx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                canvasCtx.fillStyle = "white";
+                canvasCtx.fill();
+                canvasCtx.strokeStyle = "black";
+                canvasCtx.lineWidth = 2;
+                canvasCtx.stroke();
+                
+                // Pola bola
+                canvasCtx.beginPath();
+                canvasCtx.moveTo(this.x, this.y - this.radius);
+                canvasCtx.lineTo(this.x, this.y + this.radius);
+                canvasCtx.moveTo(this.x - this.radius, this.y);
+                canvasCtx.lineTo(this.x + this.radius, this.y);
+                canvasCtx.stroke();
+            }
+        }
+
+        function startGame() {
+            document.getElementById('overlay').style.display = 'none';
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            gameActive = true;
+            balls = [new Ball()];
+            camera.start();
+        }
+
+        function onResults(results) {
+            if (!gameActive) return;
+            
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            
+            // Gambar Video Mirror
+            canvasCtx.translate(canvasElement.width, 0);
+            canvasCtx.scale(-1, 1);
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.restore();
+
+            // Gambar Garis Gawang
+            canvasCtx.fillStyle = "rgba(46, 204, 113, 0.5)";
+            canvasCtx.fillRect(0, 0, canvasElement.width, 10);
+
+            if (results.multiHandLandmarks) {
+                results.multiHandLandmarks.forEach((landmarks, index) => {
+                    const hx = (1 - landmarks[8].x) * canvasElement.width;
+                    const hy = landmarks[8].y * canvasElement.height;
+                    
+                    // Gambar Kursor Jari
+                    canvasCtx.fillStyle = index === 0 ? "#00ecff" : "#ff0055";
+                    canvasCtx.beginPath();
+                    canvasCtx.arc(hx, hy, 20, 0, Math.PI*2);
+                    canvasCtx.fill();
+
+                    // Deteksi Tabrakan Bola
+                    balls.forEach(ball => {
+                        let dist = Math.hypot(ball.x - hx, ball.y - hy);
+                        if (dist < ball.radius + 20) {
+                            playKickSound();
+                            ball.vy = -15; // Tendang ke atas
+                            ball.vx = (ball.x - hx) * 0.5; // Arah pantulan horizontal
+                        }
+                    });
+                });
+            }
+
+            balls.forEach(ball => {
+                ball.update();
+                ball.draw();
+            });
+        }
+
+        function gameOver() {
+            gameActive = false;
+            alert("GAME OVER!\nTotal Gol: " + score);
+            location.reload();
+        }
+
+        const hands = new Hands({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
+        hands.setOptions({ 
+            maxNumHands: 2,
+            modelComplexity: 1, 
+            minDetectionConfidence: 0.6, 
+            minTrackingConfidence: 0.6 
+        });
+        hands.onResults(onResults);
+
+        const camera = new Camera(videoElement, {
+            onFrame: async () => { if(gameActive) await hands.send({image: videoElement}); },
+            width: 1280, height: 720
+        });
+    </script>
+</body>
+</html>
